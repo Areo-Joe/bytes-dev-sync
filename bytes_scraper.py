@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 import argparse
+import re
 
 async def get_archive_content(session, archive_id):
     url = f"https://bytes.dev/archives/{archive_id}"
@@ -16,7 +17,22 @@ async def get_archive_content(session, archive_id):
         print(f"Error fetching archive {archive_id}: {e}")
         return None
 
-def parse_archive(html_content):
+def extract_links(content_element):
+    """提取内容中的所有链接信息"""
+    links = []
+    if content_element:
+        for link in content_element.find_all('a'):
+            href = link.get('href')
+            text = link.get_text(strip=True)
+            if href and text:
+                links.append({
+                    'text': text,
+                    'url': href,
+                    'context': link.parent.get_text(strip=True)[:100] if link.parent else ""
+                })
+    return links
+
+def parse_archive(html_content, archive_id):
     if not html_content:
         return None
     
@@ -29,10 +45,56 @@ def parse_archive(html_content):
     date_element = soup.find('time')
     date = date_element['datetime'] if date_element else datetime.now().isoformat()
     
+    # 尝试多种选择器来提取主要内容
+    text_content = ""
+    
+    # 尝试提取方法1：通过class为prose的div
+    content_element = soup.find('div', class_='prose')
+    
+    # 尝试提取方法2：如果上面没找到，找main标签
+    if not content_element or not content_element.text.strip():
+        content_element = soup.find('main')
+    
+    # 尝试提取方法3：找article标签
+    if not content_element or not content_element.text.strip():
+        content_element = soup.find('article')
+    
+    # 尝试提取方法4：找包含大量文本的div
+    if not content_element or not content_element.text.strip():
+        # 查找包含大量文本的div元素
+        divs = soup.find_all('div')
+        if divs:
+            # 按文本长度排序，取最长的
+            content_element = max(divs, key=lambda div: len(div.get_text()))
+    
+    # 提取所有链接
+    links = extract_links(content_element)
+    
+    # 提取纯文本内容
+    if content_element:
+        # 移除脚本和样式元素
+        for script in content_element.find_all(['script', 'style']):
+            script.decompose()
+            
+        # 提取文本
+        text_content = content_element.get_text(separator="\n", strip=True)
+        
+        # 清理文本（移除多余空白）
+        text_content = re.sub(r'\n\s*\n', '\n\n', text_content)
+        text_content = re.sub(r'[ \t]+', ' ', text_content)
+    
+    # 添加网页调试信息
+    debug_info = {
+        'url': f"https://bytes.dev/archives/{archive_id}",
+        'extraction_status': 'success' if text_content else 'failed'
+    }
+    
     return {
         'title': title,
-        'html_content': html_content,  # Save the full HTML content
-        'date': date
+        'text_content': text_content,
+        'links': links,  # 添加提取的链接
+        'date': date,
+        'debug_info': debug_info
     }
 
 def save_archive(archive_data, archive_id):
@@ -49,7 +111,7 @@ async def process_archive(session, archive_id, semaphore):
     async with semaphore:  # 限制并发数
         html_content = await get_archive_content(session, archive_id)
         if html_content:
-            archive_data = parse_archive(html_content)
+            archive_data = parse_archive(html_content, archive_id)  # 传递archive_id参数
             if archive_data:
                 save_archive(archive_data, archive_id)
 
